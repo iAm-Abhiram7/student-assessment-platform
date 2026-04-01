@@ -1453,9 +1453,9 @@ Status Reason
 
 #### DELETE /admin/test/{testId}
 
-Description: Permanently deletes a test from (^) exams_db.exams. Only tests created
-by this Super Admin (createdBy must match). Students' (^) aptitudeHistory entries
-are preserved (history references topic, not test (^) _id).
+Description: Soft-deletes a test from `exams_db.exams` by setting `isDeleted: true`, `deletedAt: current timestamp`, and `deletedBy: Super Admin's _id`. Only tests created
+by this Super Admin (createdBy must match). Students' aptitudeHistory entries
+are preserved (history references topic, not test _id).
 Headers: Authorization: Bearer <token> (super admin)
 Path Params: testId (string)
 Response (^) **200 OK** :
@@ -1723,9 +1723,7 @@ Status Reason
 
 #### PUT /admin/del-admin
 
-Description: Deactivates (soft-deletes) a College Admin by setting (^) isActive:
-false.^ Admin^ cannot^ log^ in^ anymore.^ Record^ preserved^ for^ audit.^ Identified^ by
-college + branch.
+Description: Deactivates and soft-deletes a College Admin by setting `isActive: false`, `isDeleted: true`, `deletedAt: current timestamp`, and `deletedBy: Super Admin's _id`. Admin cannot log in anymore. Record preserved for audit. Identified by college + branch.
 Headers: Authorization: Bearer <token> (super admin)
 Request Body:
 
@@ -1737,9 +1735,9 @@ Internal Operations:
 
 ```
 Finds admin in users_db.collegeAdmins matching college + branch in scopes[].
-Sets isActive → false.
+Sets isActive → false, isDeleted → true, deletedAt → current timestamp, deletedBy → Super Admin's _id.
 ```
-Admin login blocked (login checks (^) isActive).
+Admin login blocked (login checks `isActive` and `isDeleted`).
 Students previously managed are unchanged.
 Pending students need a new admin assigned.
 Response **200 OK** :
@@ -1759,177 +1757,86 @@ Status Reason
 
 ## 6. Database Architecture
 
-### Two Databases at a Glance
+The platform uses two databases (`users_db` and `exams_db`), with collections and schemas that support soft-delete functionality.
 
-```
-Database Collection Stores Key Fields
-users_db collegeAdmins Admin accounts emailisActive,^ scopes[],^ role,
-```
+### Database: `users_db`
 
-```
-Database Collection Stores Key Fields
-```
-```
-users_db users Student
-accounts
-```
-```
-email, college, branch,
-approvalStatus,
-aptitudeHistory[]
-```
-```
-exams_db exams All^ tests^ (both
-types)
-```
-```
-type,^ scheduledWindow,
-questions[], access fields
-```
-### Collection 1 — College Admins ( users_db.collegeAdmins )
+#### Collection: `collegeAdmins`
+Stores admin users (both Super Admin and College Admins).
 
-##### {
+| Field | Type | Required / Constraints | Description |
+|---|---|---|---|
+| `name` | String | Required | Full name of the admin |
+| `email` | String | Required, Unique | Email address |
+| `passwordHash` | String | Required | bcrypt hash of the password |
+| `role` | Enum | Default: `'COLLEGE_ADMIN'` | `'COLLEGE_ADMIN'` or `'SUPER_ADMIN'` |
+| `isActive` | Boolean | Default: `true` | False blocks login |
+| `scopes` | Array | Default: `[]` | List of `{ state, college, branch }` entries. Determines which students/exams a College Admin can access |
+| `lastLoginAt` | Date | Default: `null` | Tracks last login time |
+| `isDeleted` | Boolean | Default: `false` | Soft-delete flag |
+| `deletedAt` | Date | Default: `null` | Timestamp of deletion |
+| `deletedBy` | ObjectId | Default: `null` | ID of the admin who performed the soft-delete |
 
-```
-"_id": "ObjectId (auto-generated)",
-"name": "Admin's full name",
-"email": "Login email address",
-"passwordHash": "Encrypted password (bcrypt, never plain
-text)",
-"role": "COLLEGE_ADMIN or SUPER_ADMIN",
-"isActive": "true / false — can this admin log in?",
-"scopes": [
-{ "state": "e.g. Telangana", "college": "e.g. JNTUH",
-"branch": "e.g. CSE" }
-],
-"createdAt": "Date this account was created",
-"lastLoginAt": "Last time this admin logged in"
-}
-```
-```
-One admin can manage multiple branches — just add more rows to the
-scopes list.
-```
-### Collection 2 — Students ( users_db.users )
+#### Collection: `users`
+Stores student accounts.
 
-##### {
+| Field | Type | Required / Constraints | Description |
+|---|---|---|---|
+| `name` | String | Required | Full name of the student |
+| `email` | String | Required, Unique | Email address |
+| `passwordHash` | String | Required | bcrypt hash of the password |
+| `role` | String | Default: `'STUDENT'` | Immutable role field |
+| `state` | String | Required | Student's state |
+| `college` | String | Required | Student's college |
+| `branch` | String | Required | Student's branch (e.g., `'CSE'`) |
+| `yearOfPassing` | Number | Required | Year of graduation |
+| `approvalStatus` | Object | Default: `PENDING` | `{ status: Enum('PENDING', 'APPROVED', 'REJECTED'), approvedBy: ObjectId, approvedAt: Date, rejectionReason: String }` |
+| `aptitudeHistory` | Array | Default: `[]` | List of `{ topic, score, timeTaken, type, examId, attemptedAt }`. Capped at latest 50 attempts using mongodb $slice |
+| `otpHash` | String | Default: `null` | Temporary bcrypt hash for password reset |
+| `otpExpiry` | Date | Default: `null` | Expiry time for the OTP |
+| `lastLoginAt` | Date | Default: `null` | Tracks last login time |
+| `isDeleted` | Boolean | Default: `false` | Soft-delete flag |
+| `deletedAt` | Date | Default: `null` | Timestamp of deletion |
+| `deletedBy` | ObjectId | Default: `null` | ID of the admin who performed the soft-delete |
 
-```
-"_id": "ObjectId (auto-generated)",
-"name": "Student's full name",
-"email": "Login email address",
-"passwordHash": "Encrypted password (bcrypt)",
-"role": "Always STUDENT",
-"state": "e.g. Telangana",
-"college": "e.g. JNTUH",
-```
+### Database: `exams_db`
 
-```
-"branch": "e.g. CSE",
-"yearOfPassing": "e.g. 2026",
-"approvalStatus": {
-"status": "PENDING / APPROVED / REJECTED",
-"approvedBy": "ID of the admin who approved/rejected",
-"approvedAt": "Date of action",
-"rejectionReason": "Reason if rejected (optional)"
-},
-"aptitudeHistory": [
-{
-"topic": "e.g. Number Series",
-"score": "Score achieved",
-"timeTaken": "Seconds taken to finish",
-"type": "PRACTICE or SCHEDULED",
-"attemptedAt": "Date of attempt"
-}
-],
-"createdAt": "Date student registered"
-}
-```
-```
-aptitudeHistory stores up to 50 recent attempts. Older ones are archived
-automatically.
-```
-Collection 3 — Scheduled Test ( **exams_db.exams** where (^) **type =**
+#### Collection: `exams`
+Stores both SCHEDULED and PRACTICE exams.
 
-### "SCHEDULED" )
+| Field | Type | Required / Constraints | Description |
+|---|---|---|---|
+| `title` | String | Required | Exam title |
+| `type` | Enum | Required | `'SCHEDULED'` or `'PRACTICE'` |
+| `createdBy` | ObjectId | Required | ID of the Super Admin who created the exam |
+| `state` | String | Default: `null` | Access control (null for Practice) |
+| `college` | String | Default: `null` | Access control (null for Practice) |
+| `branch` | String | Default: `null` | Access control (null for Practice) |
+| `yearOfPassing` | Number | Default: `null` | Access control (null for Practice) |
+| `scheduledWindow` | Object | Default: `null` | `{ start: Date, end: Date }` (null for Practice) |
+| `durationMinutes` | Number | Required, Default: `45` | Exam duration in minutes |
+| `totalQuestions` | Number | Required, Default: `30` | Number of questions |
+| `totalMarks` | Number | Required, Default: `30` | Total marks available |
+| `negativeMarking` | Number | Default: `0` | `0.25` for Scheduled, `0` for Practice |
+| `shuffleQuestions`| Boolean | Default: `false` | True for Practice exams |
+| `shuffleOptions` | Boolean | Default: `false` | True for Practice exams |
+| `isPublished` | Boolean | Default: `false` | False until admin publishes |
+| `questions` | Array | Required | Array of Question objects (see below) |
+| `isDeleted` | Boolean | Default: `false` | Soft-delete flag |
+| `deletedAt` | Date | Default: `null` | Timestamp of deletion |
+| `deletedBy` | ObjectId | Default: `null` | ID of the admin who performed the soft-delete |
 
-##### {
+#### Sub-Collection details `exams.questions`
 
-```
-"_id": "ObjectId (auto-generated)",
-"title": "Exam name shown to students",
-"type": "SCHEDULED",
-"createdBy": "ID of the admin who created it",
-"state": "e.g. Telangana",
-"college": "e.g. JNTUH",
-"branch": "e.g. CSE",
-"yearOfPassing": "e.g. 2026",
-"scheduledWindow": {
-"start": "Exam opens at this date and time",
-"end": "Exam closes at this date and time"
-```
+| Field | Type | Required / Constraints | Description |
+|---|---|---|---|
+| `text` | String | Required | Question text |
+| `options` | Array | Required (length: 4)| Exactly 4 string options |
+| `correctIndex`| Number | Min: 0, Max: 3 | 0-3. **NEVER POSTED to client API** |
+| `explanation` | String | Default: `''` | Explanation shown after submission |
+| `topic` | String | Required | E.g. `'Time & Work'` |
+| `difficulty` | Enum | Default: `'MEDIUM'` | `'EASY'`, `'MEDIUM'`, or `'HARD'` |
 
-##### },
-
-```
-"durationMinutes": 45,
-"totalQuestions": 30,
-"totalMarks": 30,
-"negativeMarking": 0.25,
-"isPublished": "true / false",
-"questions": [
-{
-"text": "The question text",
-"options": ["4 answer choices"],
-"correctIndex": "0-3: which option is correct",
-"topic": "e.g. Time & Work",
-"difficulty": "EASY / MEDIUM / HARD"
-}
-]
-}
-```
-Collection 4 — Practice Test ( **exams_db.exams** where (^) **type =**
-
-### "PRACTICE" )
-
-##### {
-
-```
-"_id": "ObjectId (auto-generated)",
-"title": "e.g. Quantitative Aptitude — Set 3",
-"type": "PRACTICE",
-"createdBy": "ID of the super admin",
-"state": null,
-"college": null,
-"branch": null,
-"yearOfPassing": null,
-"scheduledWindow": null,
-"durationMinutes": 45,
-"totalQuestions": 30,
-"totalMarks": 30,
-"negativeMarking": 0,
-"shuffleQuestions": true,
-"shuffleOptions": true,
-"isPublished": "true / false",
-"questions": [
-```
-
-##### {
-
-```
-"text": "The question text",
-"options": ["4 answer choices"],
-"correctIndex": "0-3: which option is correct",
-"topic": "e.g. Speed & Distance",
-"difficulty": "EASY / MEDIUM / HARD"
-}
-]
-}
-```
-```
-null access fields mean no restriction. Any approved student from any
-college can take this exam.
-```
 ### Key Security Rules
 
 ```
@@ -2107,7 +2014,8 @@ POST /admin/test/create Super Admin
 Create
 scheduled or
 practice test
-DELETE /admin/test/{testId} Super Admin Delete a test
+DELETE /admin/test/{testId} Super Admin Soft-delete a
+test
 ```
 ```
 GET /admin/users Super Admin
